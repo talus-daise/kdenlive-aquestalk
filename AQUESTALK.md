@@ -36,11 +36,27 @@ files into the project bin.
 
 ## Characters / Dictionary dialog
 
-- Characters: one preset per line, `name:voice:speed` (speed optional),
-  e.g. `reimu:f1:1.0`
+- Characters: one preset per line, `name:voice:speed:image`
+  (speed and image optional), e.g. `reimu:f1:1.0:/home/user/reimu.png`
 - Dictionary: reading corrections, one per line, `before=after`,
   e.g. `明日=あす`. Applied to the spoken text only — subtitles keep the
   original text.
+
+## Accent notation
+
+AquesTalk accent marks can be written directly in the text, e.g.
+`こんに'ちは`. The `'` is passed to the server as-is; it is stripped
+from the subtitle text so it does not show on screen.
+(Note: whether the marks survive depends on aquestalk-server's
+text conversion — please verify with the actual server.)
+
+## Standing images (tachie)
+
+If a character preset has an image, timeline placement also puts that
+image on the first video track, one segment per line, resized to the
+exact length of the line's audio. No mouth/blink animation yet, and
+segment boundaries use durations rounded to frames, so a sub-frame
+drift against the audio is possible.
 
 Settings (server URL, voice, speed, presets, dictionary) persist via
 KdenliveSettings (group `aquestalk` in `kdenlivesettings.kcfg`).
@@ -60,9 +76,9 @@ KdenliveSettings (group `aquestalk` in `kdenlivesettings.kcfg`).
 
 ## Not yet done
 
-- Standing-image / character visuals (tachie) and lip-sync.
-- Accent / intonation editing — the aquestalk-server API only accepts
-  voice, speed and text, so this cannot be offered.
+- Mouth (lip-sync) and blink animation for standing images.
+- A GUI accent editor — accent is written as text notation instead
+  (see above).
 - Build verification on a machine with the full KDE development stack
   (Qt6, KF6, MLT 7, KDDockWidgets). The development VM has none of those,
   so the code is written against the current master APIs but not

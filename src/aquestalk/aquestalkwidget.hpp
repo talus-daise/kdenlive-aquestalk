@@ -12,6 +12,8 @@
 #include <QWidget>
 
 class QAudioOutput;
+class TimelineWidget;
+
 class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
@@ -61,17 +63,25 @@ private:
         QString displayText;
         QString voice;
         double speed{1.0};
+        QString character;
+        QString imagePath;
+    };
+    struct Preset {
+        QString voice;
+        double speed{1.0};
+        QString image;
     };
 
     void startQueue(const QList<Line> &lines, bool previewOnly);
     QList<Line> parseLines(const QStringList &rawLines) const;
     Line parseLine(const QString &raw) const;
-    QMap<QString, QPair<QString, double>> presets() const;
+    QMap<QString, Preset> presets() const;
     QList<QPair<QString, QString>> dictionary() const;
     QString currentLineText() const;
     void sendNext();
     void finishQueue(const QString &message);
     int placeOnTimeline();
+    void placeCharacterImages(TimelineWidget *timeline, int startPosition);
     QString writeSubtitles();
     bool addSubtitlesToTrack(const QString &srtPath, int offsetFrames);
     QString outputDirectory() const;
@@ -99,6 +109,7 @@ private:
     QList<Line> m_queue;
     QStringList m_generatedBinIds;
     QStringList m_generatedTexts;
+    QStringList m_generatedImages;
     QList<double> m_generatedDurations;
     QString m_batchStamp;
     int m_total{0};

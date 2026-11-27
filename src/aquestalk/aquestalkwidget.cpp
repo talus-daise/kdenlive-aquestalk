@@ -124,11 +124,14 @@ AquesTalkWidget::AquesTalkWidget(QWidget *parent)
 
 AquesTalkWidget::~AquesTalkWidget() = default;
 
-QMap<QString, QPair<QString, double>> AquesTalkWidget::presets() const
+QMap<QString, AquesTalkWidget::Preset> AquesTalkWidget::presets() const
 {
-    QMap<QString, QPair<QString, double>> result;
+    QMap<QString, Preset> result;
     const QStringList lines = KdenliveSettings::aquestalk_presets().split(QLatin1Char('\n'));
     for (const QString &line : lines) {
+        // Format: name:voice:speed:image — speed and image are optional.
+        // The image path may itself contain ':' (Windows paths), so only
+        // the first three fields are split off and the rest is the path.
         const QStringList parts = line.split(QLatin1Char(':'));
         if (parts.size() < 2) {
             continue;
@@ -138,15 +141,20 @@ QMap<QString, QPair<QString, double>> AquesTalkWidget::presets() const
         if (name.isEmpty() || !voiceIds().contains(voice)) {
             continue;
         }
-        double speed = m_speedSpin ? m_speedSpin->value() : 1.0;
-        if (parts.size() >= 3) {
+        Preset preset;
+        preset.voice = voice;
+        preset.speed = m_speedSpin ? m_speedSpin->value() : 1.0;
+        if (parts.size() >= 3 && !parts.at(2).trimmed().isEmpty()) {
             bool ok = false;
             const double parsed = parts.at(2).trimmed().toDouble(&ok);
             if (ok && parsed >= 0.5 && parsed <= 3.0) {
-                speed = parsed;
+                preset.speed = parsed;
             }
         }
-        result.insert(name, {voice, speed});
+        if (parts.size() >= 4) {
+            preset.image = parts.mid(3).join(QLatin1Char(':')).trimmed();
+        }
+        result.insert(name, preset);
     }
     return result;
 }
@@ -183,8 +191,11 @@ AquesTalkWidget::Line AquesTalkWidget::parseLine(const QString &raw) const
         const auto allPresets = presets();
         const QString name = presetMatch.captured(1).trimmed();
         if (allPresets.contains(name)) {
-            line.voice = allPresets.value(name).first;
-            line.speed = allPresets.value(name).second;
+            const Preset preset = allPresets.value(name);
+            line.voice = preset.voice;
+            line.speed = preset.speed;
+            line.character = name;
+            line.imagePath = preset.image;
             text = presetMatch.captured(2).trimmed();
         }
     }
@@ -202,7 +213,10 @@ AquesTalkWidget::Line AquesTalkWidget::parseLine(const QString &raw) const
         text = inlineMatch.captured(3).trimmed();
     }
 
+    // Accent marks (') are AquesTalk phonetic notation for the spoken
+    // text; they should not show up in subtitles, so strip them there.
     line.displayText = text;
+    line.displayText.remove(QLatin1Char('\''));
     // Reading-correction dictionary applies to the spoken text only
     QString spoken = text;
     const auto dict = dictionary();
@@ -234,7 +248,7 @@ void AquesTalkWidget::slotEditPresets()
     QDialog dialog(this);
     dialog.setWindowTitle(i18n("Characters / Dictionary"));
     auto *layout = new QVBoxLayout(&dialog);
-    layout->addWidget(new QLabel(i18n("Characters (name:voice:speed)"), &dialog));
+    layout->addWidget(new QLabel(i18n("Characters (name:voice:speed:image)"), &dialog));
     auto *presetsEdit = new QPlainTextEdit(KdenliveSettings::aquestalk_presets(), &dialog);
     layout->addWidget(presetsEdit);
     layout->addWidget(new QLabel(i18n("Dictionary (before=after)"), &dialog));
@@ -350,6 +364,7 @@ void AquesTalkWidget::startQueue(const QList<Line> &lines, bool previewOnly)
     m_cancelled = false;
     m_generatedBinIds.clear();
     m_generatedTexts.clear();
+    m_generatedImages.clear();
     m_generatedDurations.clear();
     // Batch stamp makes file names unique across runs (no overwriting)
     m_batchStamp = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss"));
@@ -487,6 +502,7 @@ void AquesTalkWidget::slotReplyFinished(QNetworkReply *reply)
         m_done++;
         m_generatedBinIds.append(binId);
         m_generatedTexts.append(line.displayText);
+        m_generatedImages.append(line.imagePath);
         m_generatedDurations.append(wavDurationSeconds(wav));
     }
     m_progress->setValue(m_done + m_failed);
@@ -505,7 +521,58 @@ int AquesTalkWidget::placeOnTimeline()
     }
     const int position = pCore->getMonitorPosition();
     const QList<int> inserted = timeline->controller()->insertClips(audioTracks.first(), position, m_generatedBinIds, true, true);
-    return inserted.isEmpty() ? -1 : position;
+    if (inserted.isEmpty()) {
+        return -1;
+    }
+    placeCharacterImages(timeline, position);
+    return position;
+}
+
+void AquesTalkWidget::placeCharacterImages(TimelineWidget *timeline, int startPosition)
+{
+    // Standing images (tachie): for each line whose character preset has an
+    // image, put the image on the first video track for exactly the span of
+    // that line's audio. Per-line segments; no mouth/blink animation yet.
+    bool anyImage = false;
+    for (const QString &image : m_generatedImages) {
+        if (!image.isEmpty()) {
+            anyImage = true;
+            break;
+        }
+    }
+    if (!anyImage) {
+        return;
+    }
+    const QList<int> videoTracks = timeline->model()->getTracksIds(false);
+    if (videoTracks.isEmpty()) {
+        return;
+    }
+    const int videoTrack = videoTracks.first();
+    const double fps = pCore->getCurrentFps();
+    QMap<QString, QString> binIdByImage;
+    int cursor = startPosition;
+    for (int i = 0; i < m_generatedBinIds.size(); ++i) {
+        const double seconds = (i < m_generatedDurations.size() && m_generatedDurations.at(i) > 0.0) ? m_generatedDurations.at(i) : 1.0;
+        const int frames = qMax(1, int(seconds * fps + 0.5));
+        const QString image = (i < m_generatedImages.size()) ? m_generatedImages.at(i) : QString();
+        if (!image.isEmpty() && QFile::exists(image)) {
+            QString imageBinId = binIdByImage.value(image);
+            if (imageBinId.isEmpty()) {
+                imageBinId = pCore->activeBin()->slotAddClipToProject(QUrl::fromLocalFile(image));
+                if (!imageBinId.isEmpty()) {
+                    binIdByImage.insert(image, imageBinId);
+                }
+            }
+            if (!imageBinId.isEmpty()) {
+                const QList<int> placed = timeline->controller()->insertClips(videoTrack, cursor, {imageBinId}, true, true);
+                if (!placed.isEmpty()) {
+                    // Stretch/shrink the image clip to the audio length
+                    timeline->model()->requestItemResize(placed.first(), frames, true, true);
+                }
+            }
+        }
+        cursor += frames;
+    }
 }
 
 QString AquesTalkWidget::writeSubtitles()
