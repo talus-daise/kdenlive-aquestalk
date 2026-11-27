@@ -11,20 +11,39 @@ files into the project bin.
    The widget only talks HTTP to it; how/where the server runs is up to you.
 2. In Kdenlive, open the dock: View menu → **AquesTalk**
    (it starts closed, tabbed on the right side like the Speech Editor).
-3. Set Server URL / Voice / Speed, write text (one line = one utterance),
-   and press **Generate and Add to Bin**.
+3. Set Server URL / Voice / Speed, write text (one line = one utterance):
+   - **Generate All** — every non-empty line, in order
+   - **Generate Line** — only the line at the text cursor
+   - **Preview Line** — generate the cursor line and play it, without
+     adding anything to the project
 4. WAV files are saved to `<project folder>/aquestalk/` with batch-stamped
    unique names (`20261127_222530_001_f1.wav`, … — existing files are never
    overwritten) and added to the project bin.
 5. Options (both on by default):
    - **Place on timeline**: inserts the generated clips, in order, on the
      first audio track at the playhead position.
-   - **Write subtitles (.srt)**: writes `<batch>_subtitles.srt` next to the
-     WAVs, timed from the WAV durations, starting at 0 (relative timing —
-     offset it to the playhead position when importing).
+   - **Add subtitles**: writes an SRT timed from the WAV durations and,
+     when the clips were placed, imports it into the timeline's subtitle
+     track at the placement position. Otherwise the .srt file is simply
+     left next to the WAVs.
 
-Settings (server URL, voice, speed) persist via KdenliveSettings
-(group `aquestalk` in `kdenlivesettings.kcfg`).
+## Per-line voice / speed
+
+- Character preset: start the line with `name>` —
+  e.g. `reimu> ゆっくりしていってね`
+- Inline override: `[f2] text` or `[f2@1.2] text`
+- Otherwise the panel's Voice / Speed apply.
+
+## Characters / Dictionary dialog
+
+- Characters: one preset per line, `name:voice:speed` (speed optional),
+  e.g. `reimu:f1:1.0`
+- Dictionary: reading corrections, one per line, `before=after`,
+  e.g. `明日=あす`. Applied to the spoken text only — subtitles keep the
+  original text.
+
+Settings (server URL, voice, speed, presets, dictionary) persist via
+KdenliveSettings (group `aquestalk` in `kdenlivesettings.kcfg`).
 
 ## Implementation notes
 
@@ -34,15 +53,17 @@ Settings (server URL, voice, speed) persist via KdenliveSettings
   `{model: "tts-1", input, voice, response_format: "wav", speed}`.
 - Registered in `MainWindow` via the standard `addDock()` helper, next to
   the Speech Editor dock, so it gets the usual View-menu toggle action.
-- Generated files are imported with `Bin::slotAddClipToProject()`.
+- Generated files are imported with `Bin::slotAddClipToProject()`;
+  timeline placement uses `TimelineController::insertClips()`;
+  subtitle import uses `SubtitleModel::importSubtitle()` (the same
+  pattern as the speech-to-text dialog).
 
 ## Not yet done
 
-- Per-line voice/speed and character presets (currently one voice+speed
-  for the whole batch).
-- Regeneration / preview of a single line, reading-correction dictionary.
-- Subtitles as a real Kdenlive subtitle track (currently an .srt file
-  with relative timing, written next to the WAVs).
+- Standing-image / character visuals (tachie) and lip-sync.
+- Accent / intonation editing — the aquestalk-server API only accepts
+  voice, speed and text, so this cannot be offered.
 - Build verification on a machine with the full KDE development stack
-  (Qt6, KF6, MLT 7, KDDockWidgets). This VM has none of those, so the
-  code is written against the current master APIs but not compiled yet.
+  (Qt6, KF6, MLT 7, KDDockWidgets). The development VM has none of those,
+  so the code is written against the current master APIs but not
+  compiled yet.

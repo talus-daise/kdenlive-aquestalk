@@ -1722,5 +1722,13 @@
       <label>Default AquesTalk speech speed.</label>
       <default>1.0</default>
     </entry>
+    <entry name="aquestalk_presets" type="String">
+      <label>Character presets, one per line: name:voice:speed</label>
+      <default></default>
+    </entry>
+    <entry name="aquestalk_dictionary" type="String">
+      <label>Reading correction dictionary, one per line: before=after</label>
+      <default></default>
+    </entry>
   </group>
 </kcfg>

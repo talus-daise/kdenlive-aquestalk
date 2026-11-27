@@ -7,6 +7,7 @@
 #include "aquestalkwidget.hpp"
 
 #include "bin/bin.h"
+#include "bin/model/subtitlemodel.hpp"
 #include "core.h"
 #include "doc/kdenlivedoc.h"
 #include "kdenlivesettings.h"
@@ -17,9 +18,12 @@
 
 #include <KLocalizedString>
 
+#include <QAudioOutput>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDateTime>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QFile>
@@ -29,20 +33,35 @@
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMediaPlayer>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QStandardPaths>
+#include <QTextCursor>
 #include <QUrl>
 #include <QVBoxLayout>
+
+namespace {
+const QStringList &voiceIds()
+{
+    static const QStringList voices = {QStringLiteral("f1"), QStringLiteral("f2"), QStringLiteral("m1"), QStringLiteral("m2"),
+                                       QStringLiteral("dvd"), QStringLiteral("imd1"), QStringLiteral("jgr"), QStringLiteral("r1")};
+    return voices;
+}
+} // namespace
 
 AquesTalkWidget::AquesTalkWidget(QWidget *parent)
     : QWidget(parent)
     , m_network(new QNetworkAccessManager(this))
+    , m_player(new QMediaPlayer(this))
+    , m_audioOutput(new QAudioOutput(this))
 {
+    m_player->setAudioOutput(m_audioOutput);
     auto *mainLayout = new QVBoxLayout(this);
 
     auto *form = new QFormLayout;
@@ -50,10 +69,7 @@ AquesTalkWidget::AquesTalkWidget(QWidget *parent)
     form->addRow(i18n("Server:"), m_serverEdit);
 
     m_voiceCombo = new QComboBox(this);
-    // Voice ids supported by aquestalk-server (AquesTalk1, old license)
-    const QStringList voices = {QStringLiteral("f1"), QStringLiteral("f2"), QStringLiteral("m1"), QStringLiteral("m2"),
-                                QStringLiteral("dvd"), QStringLiteral("imd1"), QStringLiteral("jgr"), QStringLiteral("r1")};
-    m_voiceCombo->addItems(voices);
+    m_voiceCombo->addItems(voiceIds());
     m_voiceCombo->setCurrentText(KdenliveSettings::aquestalk_voice());
     form->addRow(i18n("Voice:"), m_voiceCombo);
 
@@ -67,7 +83,7 @@ AquesTalkWidget::AquesTalkWidget(QWidget *parent)
     m_placeCheck = new QCheckBox(i18n("Place on timeline"), this);
     m_placeCheck->setChecked(true);
     mainLayout->addWidget(m_placeCheck);
-    m_subtitleCheck = new QCheckBox(i18n("Write subtitles (.srt)"), this);
+    m_subtitleCheck = new QCheckBox(i18n("Add subtitles"), this);
     m_subtitleCheck->setChecked(true);
     mainLayout->addWidget(m_subtitleCheck);
 
@@ -75,9 +91,16 @@ AquesTalkWidget::AquesTalkWidget(QWidget *parent)
     m_textEdit->setPlaceholderText(i18n("One line = one utterance"));
     mainLayout->addWidget(m_textEdit, 1);
 
+    m_presetsButton = new QPushButton(i18n("Characters / Dictionary…"), this);
+    mainLayout->addWidget(m_presetsButton);
+
     auto *buttonRow = new QHBoxLayout;
-    m_generateButton = new QPushButton(i18n("Generate and Add to Bin"), this);
+    m_generateButton = new QPushButton(i18n("Generate All"), this);
     buttonRow->addWidget(m_generateButton, 1);
+    m_lineButton = new QPushButton(i18n("Generate Line"), this);
+    buttonRow->addWidget(m_lineButton);
+    m_previewButton = new QPushButton(i18n("Preview Line"), this);
+    buttonRow->addWidget(m_previewButton);
     m_cancelButton = new QPushButton(i18n("Cancel"), this);
     m_cancelButton->setVisible(false);
     buttonRow->addWidget(m_cancelButton);
@@ -92,11 +115,140 @@ AquesTalkWidget::AquesTalkWidget(QWidget *parent)
     mainLayout->addWidget(m_status);
 
     connect(m_generateButton, &QPushButton::clicked, this, &AquesTalkWidget::slotGenerate);
+    connect(m_lineButton, &QPushButton::clicked, this, &AquesTalkWidget::slotGenerateLine);
+    connect(m_previewButton, &QPushButton::clicked, this, &AquesTalkWidget::slotPreviewLine);
+    connect(m_presetsButton, &QPushButton::clicked, this, &AquesTalkWidget::slotEditPresets);
     connect(m_cancelButton, &QPushButton::clicked, this, &AquesTalkWidget::slotCancel);
     connect(m_network, &QNetworkAccessManager::finished, this, &AquesTalkWidget::slotReplyFinished);
 }
 
 AquesTalkWidget::~AquesTalkWidget() = default;
+
+QMap<QString, QPair<QString, double>> AquesTalkWidget::presets() const
+{
+    QMap<QString, QPair<QString, double>> result;
+    const QStringList lines = KdenliveSettings::aquestalk_presets().split(QLatin1Char('\n'));
+    for (const QString &line : lines) {
+        const QStringList parts = line.split(QLatin1Char(':'));
+        if (parts.size() < 2) {
+            continue;
+        }
+        const QString name = parts.at(0).trimmed();
+        const QString voice = parts.at(1).trimmed();
+        if (name.isEmpty() || !voiceIds().contains(voice)) {
+            continue;
+        }
+        double speed = m_speedSpin ? m_speedSpin->value() : 1.0;
+        if (parts.size() >= 3) {
+            bool ok = false;
+            const double parsed = parts.at(2).trimmed().toDouble(&ok);
+            if (ok && parsed >= 0.5 && parsed <= 3.0) {
+                speed = parsed;
+            }
+        }
+        result.insert(name, {voice, speed});
+    }
+    return result;
+}
+
+QList<QPair<QString, QString>> AquesTalkWidget::dictionary() const
+{
+    QList<QPair<QString, QString>> result;
+    const QStringList lines = KdenliveSettings::aquestalk_dictionary().split(QLatin1Char('\n'));
+    for (const QString &line : lines) {
+        const int sep = line.indexOf(QLatin1Char('='));
+        if (sep <= 0) {
+            continue;
+        }
+        const QString before = line.left(sep).trimmed();
+        const QString after = line.mid(sep + 1).trimmed();
+        if (!before.isEmpty()) {
+            result.append({before, after});
+        }
+    }
+    return result;
+}
+
+AquesTalkWidget::Line AquesTalkWidget::parseLine(const QString &raw) const
+{
+    Line line;
+    line.voice = m_voiceCombo->currentText();
+    line.speed = m_speedSpin->value();
+    QString text = raw.trimmed();
+
+    // Character preset: "name> text"
+    static const QRegularExpression presetRe(QStringLiteral("^(.{1,24}?)\\s*>\\s*(.+)$"));
+    const QRegularExpressionMatch presetMatch = presetRe.match(text);
+    if (presetMatch.hasMatch()) {
+        const auto allPresets = presets();
+        const QString name = presetMatch.captured(1).trimmed();
+        if (allPresets.contains(name)) {
+            line.voice = allPresets.value(name).first;
+            line.speed = allPresets.value(name).second;
+            text = presetMatch.captured(2).trimmed();
+        }
+    }
+    // Inline override: "[f2] text" or "[f2@1.2] text"
+    static const QRegularExpression inlineRe(QStringLiteral("^\\[(f1|f2|m1|m2|dvd|imd1|jgr|r1)(?:@([0-9]*\\.?[0-9]+))?\\]\\s*(.+)$"));
+    const QRegularExpressionMatch inlineMatch = inlineRe.match(text);
+    if (inlineMatch.hasMatch()) {
+        line.voice = inlineMatch.captured(1);
+        if (!inlineMatch.captured(2).isEmpty()) {
+            const double speed = inlineMatch.captured(2).toDouble();
+            if (speed >= 0.5 && speed <= 3.0) {
+                line.speed = speed;
+            }
+        }
+        text = inlineMatch.captured(3).trimmed();
+    }
+
+    line.displayText = text;
+    // Reading-correction dictionary applies to the spoken text only
+    QString spoken = text;
+    const auto dict = dictionary();
+    for (const auto &entry : dict) {
+        spoken.replace(entry.first, entry.second);
+    }
+    line.spokenText = spoken;
+    return line;
+}
+
+QList<AquesTalkWidget::Line> AquesTalkWidget::parseLines(const QStringList &rawLines) const
+{
+    QList<Line> result;
+    for (const QString &raw : rawLines) {
+        if (!raw.trimmed().isEmpty()) {
+            result.append(parseLine(raw));
+        }
+    }
+    return result;
+}
+
+QString AquesTalkWidget::currentLineText() const
+{
+    return m_textEdit->textCursor().block().text();
+}
+
+void AquesTalkWidget::slotEditPresets()
+{
+    QDialog dialog(this);
+    dialog.setWindowTitle(i18n("Characters / Dictionary"));
+    auto *layout = new QVBoxLayout(&dialog);
+    layout->addWidget(new QLabel(i18n("Characters (name:voice:speed)"), &dialog));
+    auto *presetsEdit = new QPlainTextEdit(KdenliveSettings::aquestalk_presets(), &dialog);
+    layout->addWidget(presetsEdit);
+    layout->addWidget(new QLabel(i18n("Dictionary (before=after)"), &dialog));
+    auto *dictEdit = new QPlainTextEdit(KdenliveSettings::aquestalk_dictionary(), &dialog);
+    layout->addWidget(dictEdit);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() == QDialog::Accepted) {
+        KdenliveSettings::setAquestalk_presets(presetsEdit->toPlainText());
+        KdenliveSettings::setAquestalk_dictionary(dictEdit->toPlainText());
+    }
+}
 
 QString AquesTalkWidget::outputDirectory() const
 {
@@ -153,18 +305,35 @@ double AquesTalkWidget::wavDurationSeconds(const QByteArray &wav)
 
 void AquesTalkWidget::slotGenerate()
 {
+    startQueue(parseLines(m_textEdit->toPlainText().split(QLatin1Char('\n'))), false);
+}
+
+void AquesTalkWidget::slotGenerateLine()
+{
+    const QString raw = currentLineText();
+    if (raw.trimmed().isEmpty()) {
+        m_status->setText(i18n("No text"));
+        return;
+    }
+    startQueue({parseLine(raw)}, false);
+}
+
+void AquesTalkWidget::slotPreviewLine()
+{
+    const QString raw = currentLineText();
+    if (raw.trimmed().isEmpty()) {
+        m_status->setText(i18n("No text"));
+        return;
+    }
+    startQueue({parseLine(raw)}, true);
+}
+
+void AquesTalkWidget::startQueue(const QList<Line> &lines, bool previewOnly)
+{
     if (m_running) {
         return;
     }
-    m_queue.clear();
-    const QStringList lines = m_textEdit->toPlainText().split(QLatin1Char('\n'));
-    for (const QString &line : lines) {
-        const QString trimmed = line.trimmed();
-        if (!trimmed.isEmpty()) {
-            m_queue.append(trimmed);
-        }
-    }
-    if (m_queue.isEmpty()) {
+    if (lines.isEmpty()) {
         m_status->setText(i18n("No text"));
         return;
     }
@@ -173,6 +342,8 @@ void AquesTalkWidget::slotGenerate()
     KdenliveSettings::setAquestalk_voice(m_voiceCombo->currentText());
     KdenliveSettings::setAquestalk_speed(m_speedSpin->value());
 
+    m_queue = lines;
+    m_previewOnly = previewOnly;
     m_total = m_queue.size();
     m_done = 0;
     m_failed = 0;
@@ -184,6 +355,8 @@ void AquesTalkWidget::slotGenerate()
     m_batchStamp = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss"));
     m_running = true;
     m_generateButton->setEnabled(false);
+    m_lineButton->setEnabled(false);
+    m_previewButton->setEnabled(false);
     m_cancelButton->setVisible(true);
     m_progress->setRange(0, m_total);
     m_progress->setValue(0);
@@ -209,15 +382,25 @@ void AquesTalkWidget::sendNext()
         return;
     }
     if (m_queue.isEmpty()) {
+        if (m_previewOnly) {
+            finishQueue(i18n("Preview done"));
+            return;
+        }
         QString message = i18n("Done: %1 clip(s) added to the bin", m_done);
+        int placedPosition = -1;
         if (m_placeCheck->isChecked() && !m_generatedBinIds.isEmpty()) {
-            const QString placeError = placeOnTimeline();
-            if (!placeError.isEmpty()) {
-                message += QStringLiteral(" / ") + placeError;
+            placedPosition = placeOnTimeline();
+            if (placedPosition < 0) {
+                message += QStringLiteral(" / ") + i18n("Timeline placement failed (no timeline, no audio track, or track busy at playhead)");
             }
         }
         if (m_subtitleCheck->isChecked() && !m_generatedTexts.isEmpty()) {
-            writeSubtitles();
+            const QString srtPath = writeSubtitles();
+            if (!srtPath.isEmpty() && placedPosition >= 0) {
+                if (!addSubtitlesToTrack(srtPath, placedPosition)) {
+                    message += QStringLiteral(" / ") + i18n("Subtitles saved as .srt file");
+                }
+            }
         }
         if (m_failed > 0) {
             message += i18n(" (%1 failed)", m_failed);
@@ -225,8 +408,8 @@ void AquesTalkWidget::sendNext()
         finishQueue(message);
         return;
     }
-    const QString text = m_queue.first();
-    m_status->setText(i18n("Generating %1/%2: %3", m_done + m_failed + 1, m_total, text.left(30)));
+    const Line &line = m_queue.first();
+    m_status->setText(i18n("Generating %1/%2: %3", m_done + m_failed + 1, m_total, line.displayText.left(30)));
 
     QString server = m_serverEdit->text().trimmed();
     if (server.endsWith(QLatin1Char('/'))) {
@@ -237,10 +420,10 @@ void AquesTalkWidget::sendNext()
 
     QJsonObject body;
     body.insert(QStringLiteral("model"), QStringLiteral("tts-1"));
-    body.insert(QStringLiteral("input"), text);
-    body.insert(QStringLiteral("voice"), m_voiceCombo->currentText());
+    body.insert(QStringLiteral("input"), line.spokenText);
+    body.insert(QStringLiteral("voice"), line.voice);
     body.insert(QStringLiteral("response_format"), QStringLiteral("wav"));
-    body.insert(QStringLiteral("speed"), m_speedSpin->value());
+    body.insert(QStringLiteral("speed"), line.speed);
     m_currentReply = m_network->post(request, QJsonDocument(body).toJson(QJsonDocument::Compact));
 }
 
@@ -257,7 +440,7 @@ void AquesTalkWidget::slotReplyFinished(QNetworkReply *reply)
         finishQueue(i18n("Cancelled: %1 clip(s) generated", m_done));
         return;
     }
-    const QString text = m_queue.takeFirst();
+    const Line line = m_queue.takeFirst();
     if (reply->error() != QNetworkReply::NoError) {
         // Network-level failure: the server is most likely down, abort the queue
         finishQueue(i18n("Failed: %1 (is aquestalk-server running at %2?)", reply->errorString(), m_serverEdit->text().trimmed()));
@@ -271,7 +454,22 @@ void AquesTalkWidget::slotReplyFinished(QNetworkReply *reply)
         sendNext();
         return;
     }
-    const QString baseName = QStringLiteral("%1_%2_%3").arg(m_batchStamp).arg(m_done + m_failed + 1, 3, 10, QLatin1Char('0')).arg(m_voiceCombo->currentText());
+    if (m_previewOnly) {
+        const QString fileName = uniqueFilePath(QStringLiteral("preview"));
+        QFile file(fileName);
+        if (file.open(QIODevice::WriteOnly) && file.write(wav) == wav.size()) {
+            file.close();
+            m_done++;
+            m_player->setSource(QUrl::fromLocalFile(fileName));
+            m_player->play();
+        } else {
+            m_failed++;
+        }
+        m_progress->setValue(m_done + m_failed);
+        sendNext();
+        return;
+    }
+    const QString baseName = QStringLiteral("%1_%2_%3").arg(m_batchStamp).arg(m_done + m_failed + 1, 3, 10, QLatin1Char('0')).arg(line.voice);
     const QString fileName = uniqueFilePath(baseName);
     QFile file(fileName);
     if (!file.open(QIODevice::WriteOnly) || file.write(wav) != wav.size()) {
@@ -288,32 +486,29 @@ void AquesTalkWidget::slotReplyFinished(QNetworkReply *reply)
     } else {
         m_done++;
         m_generatedBinIds.append(binId);
-        m_generatedTexts.append(text);
+        m_generatedTexts.append(line.displayText);
         m_generatedDurations.append(wavDurationSeconds(wav));
     }
     m_progress->setValue(m_done + m_failed);
     sendNext();
 }
 
-QString AquesTalkWidget::placeOnTimeline()
+int AquesTalkWidget::placeOnTimeline()
 {
     TimelineWidget *timeline = pCore->window() ? pCore->window()->getCurrentTimeline() : nullptr;
     if (!timeline || !timeline->controller() || !timeline->model()) {
-        return i18n("No timeline available for placement");
+        return -1;
     }
     const QList<int> audioTracks = timeline->model()->getTracksIds(true);
     if (audioTracks.isEmpty()) {
-        return i18n("No audio track for placement");
+        return -1;
     }
     const int position = pCore->getMonitorPosition();
     const QList<int> inserted = timeline->controller()->insertClips(audioTracks.first(), position, m_generatedBinIds, true, true);
-    if (inserted.isEmpty()) {
-        return i18n("Timeline placement failed (track busy at playhead?)");
-    }
-    return QString();
+    return inserted.isEmpty() ? -1 : position;
 }
 
-void AquesTalkWidget::writeSubtitles()
+QString AquesTalkWidget::writeSubtitles()
 {
     auto formatTime = [](double seconds) {
         const int totalMs = int(seconds * 1000.0);
@@ -336,10 +531,28 @@ void AquesTalkWidget::writeSubtitles()
     }
     const QString path = uniqueFilePath(m_batchStamp + QStringLiteral("_subtitles"), QStringLiteral("srt"));
     QFile file(path);
-    if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        file.write(srt.toUtf8());
-        file.close();
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        return QString();
     }
+    file.write(srt.toUtf8());
+    file.close();
+    return path;
+}
+
+bool AquesTalkWidget::addSubtitlesToTrack(const QString &srtPath, int offsetFrames)
+{
+    TimelineWidget *timeline = pCore->window() ? pCore->window()->getCurrentTimeline() : nullptr;
+    if (!timeline || !timeline->model()) {
+        return false;
+    }
+    auto subtitleModel = timeline->model()->getSubtitleModel();
+    if (!subtitleModel) {
+        return false;
+    }
+    // Same pattern as the speech-to-text dialog: import the SRT at the
+    // placement position (offset in frames) as an external import.
+    subtitleModel->importSubtitle(srtPath, offsetFrames, true);
+    return true;
 }
 
 void AquesTalkWidget::finishQueue(const QString &message)
@@ -348,6 +561,8 @@ void AquesTalkWidget::finishQueue(const QString &message)
     m_queue.clear();
     m_currentReply = nullptr;
     m_generateButton->setEnabled(true);
+    m_lineButton->setEnabled(true);
+    m_previewButton->setEnabled(true);
     m_cancelButton->setVisible(false);
     m_progress->setVisible(false);
     m_status->setText(message);
