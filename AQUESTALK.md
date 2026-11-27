@@ -13,8 +13,15 @@ files into the project bin.
    (it starts closed, tabbed on the right side like the Speech Editor).
 3. Set Server URL / Voice / Speed, write text (one line = one utterance),
    and press **Generate and Add to Bin**.
-4. WAV files are saved to `<project folder>/aquestalk/001_f1.wav`, … and
-   added to the project bin. Drag them onto the timeline as usual.
+4. WAV files are saved to `<project folder>/aquestalk/` with batch-stamped
+   unique names (`20261127_222530_001_f1.wav`, … — existing files are never
+   overwritten) and added to the project bin.
+5. Options (both on by default):
+   - **Place on timeline**: inserts the generated clips, in order, on the
+     first audio track at the playhead position.
+   - **Write subtitles (.srt)**: writes `<batch>_subtitles.srt` next to the
+     WAVs, timed from the WAV durations, starting at 0 (relative timing —
+     offset it to the playhead position when importing).
 
 Settings (server URL, voice, speed) persist via KdenliveSettings
 (group `aquestalk` in `kdenlivesettings.kcfg`).
@@ -31,9 +38,11 @@ Settings (server URL, voice, speed) persist via KdenliveSettings
 
 ## Not yet done
 
-- Placing clips directly on the timeline at the playhead, in order.
-- Subtitle generation from the source lines (SRT / subtitle track).
-- Per-line voice/speed (currently one voice+speed for the whole batch).
+- Per-line voice/speed and character presets (currently one voice+speed
+  for the whole batch).
+- Regeneration / preview of a single line, reading-correction dictionary.
+- Subtitles as a real Kdenlive subtitle track (currently an .srt file
+  with relative timing, written next to the WAVs).
 - Build verification on a machine with the full KDE development stack
   (Qt6, KF6, MLT 7, KDDockWidgets). This VM has none of those, so the
-  patch is written against the current master APIs but not compiled yet.
+  code is written against the current master APIs but not compiled yet.

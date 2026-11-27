@@ -10,14 +10,21 @@
 #include "core.h"
 #include "doc/kdenlivedoc.h"
 #include "kdenlivesettings.h"
+#include "mainwindow.h"
+#include "timeline2/model/timelineitemmodel.hpp"
+#include "timeline2/view/timelinecontroller.h"
+#include "timeline2/view/timelinewidget.h"
 
 #include <KLocalizedString>
 
+#include <QCheckBox>
 #include <QComboBox>
+#include <QDateTime>
 #include <QDir>
-#include <QFile>
 #include <QDoubleSpinBox>
+#include <QFile>
 #include <QFormLayout>
+#include <QHBoxLayout>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
@@ -57,12 +64,24 @@ AquesTalkWidget::AquesTalkWidget(QWidget *parent)
     form->addRow(i18n("Speed:"), m_speedSpin);
     mainLayout->addLayout(form);
 
+    m_placeCheck = new QCheckBox(i18n("Place on timeline"), this);
+    m_placeCheck->setChecked(true);
+    mainLayout->addWidget(m_placeCheck);
+    m_subtitleCheck = new QCheckBox(i18n("Write subtitles (.srt)"), this);
+    m_subtitleCheck->setChecked(true);
+    mainLayout->addWidget(m_subtitleCheck);
+
     m_textEdit = new QPlainTextEdit(this);
     m_textEdit->setPlaceholderText(i18n("One line = one utterance"));
     mainLayout->addWidget(m_textEdit, 1);
 
+    auto *buttonRow = new QHBoxLayout;
     m_generateButton = new QPushButton(i18n("Generate and Add to Bin"), this);
-    mainLayout->addWidget(m_generateButton);
+    buttonRow->addWidget(m_generateButton, 1);
+    m_cancelButton = new QPushButton(i18n("Cancel"), this);
+    m_cancelButton->setVisible(false);
+    buttonRow->addWidget(m_cancelButton);
+    mainLayout->addLayout(buttonRow);
 
     m_progress = new QProgressBar(this);
     m_progress->setVisible(false);
@@ -73,6 +92,7 @@ AquesTalkWidget::AquesTalkWidget(QWidget *parent)
     mainLayout->addWidget(m_status);
 
     connect(m_generateButton, &QPushButton::clicked, this, &AquesTalkWidget::slotGenerate);
+    connect(m_cancelButton, &QPushButton::clicked, this, &AquesTalkWidget::slotCancel);
     connect(m_network, &QNetworkAccessManager::finished, this, &AquesTalkWidget::slotReplyFinished);
 }
 
@@ -91,6 +111,44 @@ QString AquesTalkWidget::outputDirectory() const
     const QString dir = base + QStringLiteral("/aquestalk");
     QDir().mkpath(dir);
     return dir;
+}
+
+QString AquesTalkWidget::uniqueFilePath(const QString &baseName, const QString &extension) const
+{
+    // Never overwrite an existing file: clips already in the bin/timeline
+    // reference WAVs by path, so overwriting would silently change their audio.
+    const QString dir = outputDirectory();
+    QString path = QStringLiteral("%1/%2.%3").arg(dir, baseName, extension);
+    int suffix = 2;
+    while (QFile::exists(path)) {
+        path = QStringLiteral("%1/%2_%3.%4").arg(dir, baseName).arg(suffix++).arg(extension);
+    }
+    return path;
+}
+
+double AquesTalkWidget::wavDurationSeconds(const QByteArray &wav)
+{
+    // Minimal RIFF parse: byte rate at offset 28, "data" chunk size after it.
+    if (wav.size() < 44 || !wav.startsWith("RIFF")) {
+        return 0.0;
+    }
+    auto u32le = [&wav](int offset) -> quint32 {
+        return quint32(quint8(wav[offset])) | (quint32(quint8(wav[offset + 1])) << 8) | (quint32(quint8(wav[offset + 2])) << 16) |
+               (quint32(quint8(wav[offset + 3])) << 24);
+    };
+    const quint32 byteRate = u32le(28);
+    if (byteRate == 0) {
+        return 0.0;
+    }
+    int offset = 12;
+    while (offset + 8 <= wav.size()) {
+        const quint32 chunkSize = u32le(offset + 4);
+        if (wav.mid(offset, 4) == "data") {
+            return double(chunkSize) / double(byteRate);
+        }
+        offset += 8 + int(chunkSize) + (chunkSize % 2);
+    }
+    return 0.0;
 }
 
 void AquesTalkWidget::slotGenerate()
@@ -117,22 +175,58 @@ void AquesTalkWidget::slotGenerate()
 
     m_total = m_queue.size();
     m_done = 0;
+    m_failed = 0;
+    m_cancelled = false;
+    m_generatedBinIds.clear();
+    m_generatedTexts.clear();
+    m_generatedDurations.clear();
+    // Batch stamp makes file names unique across runs (no overwriting)
+    m_batchStamp = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss"));
     m_running = true;
     m_generateButton->setEnabled(false);
+    m_cancelButton->setVisible(true);
     m_progress->setRange(0, m_total);
     m_progress->setValue(0);
     m_progress->setVisible(true);
     sendNext();
 }
 
+void AquesTalkWidget::slotCancel()
+{
+    if (!m_running) {
+        return;
+    }
+    m_cancelled = true;
+    if (m_currentReply) {
+        m_currentReply->abort();
+    }
+}
+
 void AquesTalkWidget::sendNext()
 {
+    if (m_cancelled) {
+        finishQueue(i18n("Cancelled: %1 clip(s) generated", m_done));
+        return;
+    }
     if (m_queue.isEmpty()) {
-        finishQueue(true, i18n("Done: %1 clip(s) added to the bin", m_done));
+        QString message = i18n("Done: %1 clip(s) added to the bin", m_done);
+        if (m_placeCheck->isChecked() && !m_generatedBinIds.isEmpty()) {
+            const QString placeError = placeOnTimeline();
+            if (!placeError.isEmpty()) {
+                message += QStringLiteral(" / ") + placeError;
+            }
+        }
+        if (m_subtitleCheck->isChecked() && !m_generatedTexts.isEmpty()) {
+            writeSubtitles();
+        }
+        if (m_failed > 0) {
+            message += i18n(" (%1 failed)", m_failed);
+        }
+        finishQueue(message);
         return;
     }
     const QString text = m_queue.first();
-    m_status->setText(i18n("Generating %1/%2: %3", m_done + 1, m_total, text.left(30)));
+    m_status->setText(i18n("Generating %1/%2: %3", m_done + m_failed + 1, m_total, text.left(30)));
 
     QString server = m_serverEdit->text().trimmed();
     if (server.endsWith(QLatin1Char('/'))) {
@@ -147,48 +241,115 @@ void AquesTalkWidget::sendNext()
     body.insert(QStringLiteral("voice"), m_voiceCombo->currentText());
     body.insert(QStringLiteral("response_format"), QStringLiteral("wav"));
     body.insert(QStringLiteral("speed"), m_speedSpin->value());
-    m_network->post(request, QJsonDocument(body).toJson(QJsonDocument::Compact));
+    m_currentReply = m_network->post(request, QJsonDocument(body).toJson(QJsonDocument::Compact));
 }
 
 void AquesTalkWidget::slotReplyFinished(QNetworkReply *reply)
 {
     reply->deleteLater();
+    if (reply == m_currentReply) {
+        m_currentReply = nullptr;
+    }
     if (!m_running) {
+        return;
+    }
+    if (m_cancelled) {
+        finishQueue(i18n("Cancelled: %1 clip(s) generated", m_done));
         return;
     }
     const QString text = m_queue.takeFirst();
     if (reply->error() != QNetworkReply::NoError) {
-        finishQueue(false, i18n("Failed: %1 (is aquestalk-server running at %2?)", reply->errorString(), m_serverEdit->text().trimmed()));
+        // Network-level failure: the server is most likely down, abort the queue
+        finishQueue(i18n("Failed: %1 (is aquestalk-server running at %2?)", reply->errorString(), m_serverEdit->text().trimmed()));
         return;
     }
     const QByteArray wav = reply->readAll();
     if (wav.size() < 44 || !wav.startsWith("RIFF")) {
-        finishQueue(false, i18n("Failed: server did not return a WAV file"));
+        // Bad payload for this line only: skip it and continue with the rest
+        m_failed++;
+        m_progress->setValue(m_done + m_failed);
+        sendNext();
         return;
     }
-    const QString fileName = QStringLiteral("%1/%2_%3.wav")
-                                 .arg(outputDirectory())
-                                 .arg(m_done + 1, 3, 10, QLatin1Char('0'))
-                                 .arg(m_voiceCombo->currentText());
+    const QString baseName = QStringLiteral("%1_%2_%3").arg(m_batchStamp).arg(m_done + m_failed + 1, 3, 10, QLatin1Char('0')).arg(m_voiceCombo->currentText());
+    const QString fileName = uniqueFilePath(baseName);
     QFile file(fileName);
     if (!file.open(QIODevice::WriteOnly) || file.write(wav) != wav.size()) {
-        finishQueue(false, i18n("Failed: could not write %1", fileName));
+        m_failed++;
+        m_progress->setValue(m_done + m_failed);
+        sendNext();
         return;
     }
     file.close();
-    // Import into the project bin; from there it can be dropped on the timeline
-    pCore->activeBin()->slotAddClipToProject(QUrl::fromLocalFile(fileName));
-    m_done++;
-    m_progress->setValue(m_done);
+    // Import into the project bin; keep the bin id for timeline placement
+    const QString binId = pCore->activeBin()->slotAddClipToProject(QUrl::fromLocalFile(fileName));
+    if (binId.isEmpty()) {
+        m_failed++;
+    } else {
+        m_done++;
+        m_generatedBinIds.append(binId);
+        m_generatedTexts.append(text);
+        m_generatedDurations.append(wavDurationSeconds(wav));
+    }
+    m_progress->setValue(m_done + m_failed);
     sendNext();
 }
 
-void AquesTalkWidget::finishQueue(bool success, const QString &message)
+QString AquesTalkWidget::placeOnTimeline()
+{
+    TimelineWidget *timeline = pCore->window() ? pCore->window()->getCurrentTimeline() : nullptr;
+    if (!timeline || !timeline->controller() || !timeline->model()) {
+        return i18n("No timeline available for placement");
+    }
+    const QList<int> audioTracks = timeline->model()->getTracksIds(true);
+    if (audioTracks.isEmpty()) {
+        return i18n("No audio track for placement");
+    }
+    const int position = pCore->getMonitorPosition();
+    const QList<int> inserted = timeline->controller()->insertClips(audioTracks.first(), position, m_generatedBinIds, true, true);
+    if (inserted.isEmpty()) {
+        return i18n("Timeline placement failed (track busy at playhead?)");
+    }
+    return QString();
+}
+
+void AquesTalkWidget::writeSubtitles()
+{
+    auto formatTime = [](double seconds) {
+        const int totalMs = int(seconds * 1000.0);
+        const int ms = totalMs % 1000;
+        const int s = (totalMs / 1000) % 60;
+        const int m = (totalMs / 60000) % 60;
+        const int h = totalMs / 3600000;
+        return QStringLiteral("%1:%2:%3,%4")
+            .arg(h, 2, 10, QLatin1Char('0'))
+            .arg(m, 2, 10, QLatin1Char('0'))
+            .arg(s, 2, 10, QLatin1Char('0'))
+            .arg(ms, 3, 10, QLatin1Char('0'));
+    };
+    QString srt;
+    double cursor = 0.0;
+    for (int i = 0; i < m_generatedTexts.size(); ++i) {
+        const double duration = (i < m_generatedDurations.size() && m_generatedDurations.at(i) > 0.0) ? m_generatedDurations.at(i) : 1.0;
+        srt += QStringLiteral("%1\n%2 --> %3\n%4\n\n").arg(i + 1).arg(formatTime(cursor), formatTime(cursor + duration), m_generatedTexts.at(i));
+        cursor += duration;
+    }
+    const QString path = uniqueFilePath(m_batchStamp + QStringLiteral("_subtitles"), QStringLiteral("srt"));
+    QFile file(path);
+    if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        file.write(srt.toUtf8());
+        file.close();
+    }
+}
+
+void AquesTalkWidget::finishQueue(const QString &message)
 {
     m_running = false;
     m_queue.clear();
+    m_currentReply = nullptr;
     m_generateButton->setEnabled(true);
+    m_cancelButton->setVisible(false);
     m_progress->setVisible(false);
     m_status->setText(message);
-    pCore->displayMessage(message, success ? MessageType::InformationMessage : MessageType::ErrorMessage, 500);
+    pCore->displayMessage(message, m_failed == 0 && !m_cancelled ? MessageType::InformationMessage : MessageType::ErrorMessage, 500);
 }
