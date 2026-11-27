@@ -286,6 +286,7 @@ private:
     KDDockWidgets::QtWidgets::DockWidget *m_undoViewDock{nullptr};
     KDDockWidgets::QtWidgets::DockWidget *m_mixerDock{nullptr};
     KDDockWidgets::QtWidgets::DockWidget *m_onlineResourcesDock{nullptr};
+    KDDockWidgets::QtWidgets::DockWidget *m_aquestalkDock{nullptr};
 
     KSelectAction *m_timeFormatButton;
     QAction *m_compositeAction;
