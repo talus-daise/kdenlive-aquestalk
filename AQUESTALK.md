@@ -5,6 +5,41 @@ with [aquestalk-server](https://github.com/Lqm1/aquestalk-server)
 (AquesTalk1, OpenAI-compatible HTTP API) and imports the generated WAV
 files into the project bin.
 
+## Building
+
+This is a fork of Kdenlive master; the full upstream build guide is
+[`dev-docs/build.md`](dev-docs/build.md) in this repository. In short:
+
+Requirements are recent: Qt >= 6.10, KF6 >= 6.21, MLT >= 7.42
+( upstream lists Ubuntu 26.04+ or Arch as supported). On older distros
+you will also have to build MLT and KDDockWidgets from source first —
+both are covered in `dev-docs/build.md`.
+
+```bash
+# Dependencies (Debian/Ubuntu; enable deb-src first)
+sudo apt install build-essential git cmake extra-cmake-modules ninja-build
+sudo apt build-dep mlt kdenlive
+
+# This fork, the feature branch
+git clone https://github.com/talus-daise/kdenlive-aquestalk.git
+cd kdenlive-aquestalk
+git checkout feat/aquestalk-dock
+
+# Configure, build, install
+mkdir build && cd build
+cmake .. -GNinja -DCMAKE_INSTALL_PREFIX=/usr/local \
+  -DKDE_INSTALL_USE_QT_SYS_PATHS=ON -DRELEASE_BUILD=OFF -DBUILD_TESTING=OFF
+ninja -j$(nproc)
+sudo ninja install   # required: effects etc. are only complete after install
+
+# Run (when installed outside a system path)
+. prefix.sh
+kdenlive
+```
+
+The AquesTalk dock adds no new dependencies beyond Kdenlive's own
+(Qt Network and Qt Multimedia are already part of the build).
+
 ## Usage
 
 1. Start aquestalk-server (listens on port 8080 by default).
