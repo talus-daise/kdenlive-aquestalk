@@ -213,10 +213,9 @@ AquesTalkWidget::Line AquesTalkWidget::parseLine(const QString &raw) const
         text = inlineMatch.captured(3).trimmed();
     }
 
-    // Accent marks (') are AquesTalk phonetic notation for the spoken
-    // text; they should not show up in subtitles, so strip them there.
-    line.displayText = text;
-    line.displayText.remove(QLatin1Char('\''));
+    // The spoken text keeps the full AquesTalk phonetic notation;
+    // the subtitle/display text is derived from it (see buildDisplayText).
+    line.displayText = buildDisplayText(text);
     // Reading-correction dictionary applies to the spoken text only
     QString spoken = text;
     const auto dict = dictionary();
@@ -290,6 +289,49 @@ QString AquesTalkWidget::uniqueFilePath(const QString &baseName, const QString &
         path = QStringLiteral("%1/%2_%3.%4").arg(dir, baseName).arg(suffix++).arg(extension);
     }
     return path;
+}
+
+QString AquesTalkWidget::buildDisplayText(const QString &text)
+{
+    // Derive the subtitle/display text from a line that may contain
+    // AquesTalk phonetic notation (see the AquesTalk phonetic-string spec).
+    // Rules:
+    //  - Lines without any phonetic notation are returned untouched, so a
+    //    literal "+", "/" or "," in normal prose is never eaten.
+    //  - <NUM>/<NUMK>/<ALPHA> tags are replaced by their VAL contents:
+    //    the numbers/letters must stay visible in subtitles.
+    //  - Accent marks (') are pure control symbols: removed.
+    //  - Phrase separators / ; + between kana are phrase boundaries with
+    //    no display meaning: removed (only between kana, so "1+1" or
+    //    "C++" in prose-like content is not affected).
+    //  - Halfwidth comma is a short pause: shown as 、.
+    //  - Devoicing marker _ (prefix of a katakana syllable): removed,
+    //    the kana itself is kept.
+    //  - Nasal marker ゜ is part of the reading symbol: kept as written.
+    QString display = text;
+    static const QRegularExpression quotedTagRe(QStringLiteral("<(NUMK?|ALPHA)\\s+VAL=\"([^\"]+)\"(?:\\s+COUNTER=[^>]*)?>"));
+    static const QRegularExpression plainTagRe(QStringLiteral("<(NUMK?|ALPHA)\\s+VAL=([^\\s>]+)(?:\\s+COUNTER=[^>]*)?>"));
+    static const QRegularExpression separatorRe(QStringLiteral("(?<=[\\x{3040}-\\x{30FF}])[/;+](?=[\\x{3040}-\\x{30FF}])"));
+    // Separator right after a number/tag value, e.g. "<NUMK VAL=...>+でした"
+    static const QRegularExpression separatorAfterDigitRe(QStringLiteral("(?<=[0-9])[/;+](?=[\\x{3040}-\\x{30FF}])"));
+    // Separator right before a number/tag value, e.g. "あと/<NUMK VAL=...>"
+    static const QRegularExpression separatorBeforeDigitRe(QStringLiteral("(?<=[\\x{3040}-\\x{30FF}])[/;+](?=[0-9])"));
+
+    bool phonetic = display.contains(QLatin1Char('\'')) || display.contains(quotedTagRe) || display.contains(plainTagRe) || display.contains(separatorRe);
+    display.replace(quotedTagRe, QStringLiteral("\\2"));
+    display.replace(plainTagRe, QStringLiteral("\\2"));
+    if (!phonetic) {
+        return display;
+    }
+    display.remove(QLatin1Char('\''));
+    display.replace(QLatin1Char(','), QStringLiteral("、"));
+    display.replace(separatorRe, QString());
+    display.replace(separatorAfterDigitRe, QString());
+    display.replace(separatorBeforeDigitRe, QString());
+    // Devoicing marker is a prefix of the devoiced katakana syllable
+    static const QRegularExpression devoicingRe(QStringLiteral("_(?=[\\x{30A0}-\\x{30FF}])"));
+    display.replace(devoicingRe, QString());
+    return display;
 }
 
 double AquesTalkWidget::wavDurationSeconds(const QByteArray &wav)

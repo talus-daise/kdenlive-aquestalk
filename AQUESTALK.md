@@ -42,12 +42,24 @@ files into the project bin.
   e.g. `明日=あす`. Applied to the spoken text only — subtitles keep the
   original text.
 
-## Accent notation
+## Phonetic notation (accents and symbols)
 
-AquesTalk accent marks can be written directly in the text, e.g.
-`こんに'ちは`. The `'` is passed to the server as-is; it is stripped
-from the subtitle text so it does not show on screen.
-(Note: whether the marks survive depends on aquestalk-server's
+The text may contain full AquesTalk phonetic notation (see A-Quest's
+"音声記号列仕様書"): accent `'`, phrase separators `/` `;` `+` and
+halfwidth `,`, devoicing `_` before a katakana syllable, nasal `゜`,
+and the reading tags `<NUM VAL=...>`, `<NUMK VAL=... COUNTER=...>`
+and `<ALPHA VAL=...>`. The spoken text is sent to the server as-is.
+
+The subtitle/display text is derived with these rules:
+
+- A line with no phonetic notation is shown untouched (a literal `+`
+  or `/` in normal prose is never eaten).
+- Tags are replaced by their VAL contents, so numbers and codes stay
+  visible: `<NUM VAL=01-2345>` shows as `01-2345`.
+- `'` is removed; `/` `;` `+` between kana (or next to a number) are
+  removed; halfwidth `,` becomes `、`; `_` is removed; `゜` is kept.
+
+(Note: whether the notation survives depends on aquestalk-server's
 text conversion — please verify with the actual server.)
 
 ## Standing images (tachie)

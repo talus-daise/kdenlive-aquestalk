@@ -87,6 +87,7 @@ private:
     QString outputDirectory() const;
     QString uniqueFilePath(const QString &baseName, const QString &extension = QStringLiteral("wav")) const;
     static double wavDurationSeconds(const QByteArray &wav);
+    static QString buildDisplayText(const QString &text);
 
     QLineEdit *m_serverEdit{nullptr};
     QComboBox *m_voiceCombo{nullptr};
