@@ -1709,4 +1709,26 @@
       <default>true</default>
     </entry>
     </group>
+  <group name="aquestalk">
+    <entry name="aquestalk_server" type="String">
+      <label>URL of the aquestalk-server (AquesTalk TTS API).</label>
+      <default>http://localhost:8080</default>
+    </entry>
+    <entry name="aquestalk_voice" type="String">
+      <label>Default AquesTalk voice id.</label>
+      <default>f1</default>
+    </entry>
+    <entry name="aquestalk_speed" type="Double">
+      <label>Default AquesTalk speech speed.</label>
+      <default>1.0</default>
+    </entry>
+    <entry name="aquestalk_presets" type="String">
+      <label>Character presets, one per line: name:voice:speed</label>
+      <default></default>
+    </entry>
+    <entry name="aquestalk_dictionary" type="String">
+      <label>Reading correction dictionary, one per line: before=after</label>
+      <default></default>
+    </entry>
+  </group>
 </kcfg>

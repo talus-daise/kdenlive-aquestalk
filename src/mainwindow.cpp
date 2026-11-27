@@ -14,6 +14,7 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 #include "bin/projectclip.h"
 #include "bin/projectfolder.h"
 #include "bin/projectitemmodel.h"
+#include "aquestalk/aquestalkwidget.hpp"
 #include "core.h"
 #include "dialogs/clipcreationdialog.h"
 #include "dialogs/clipjobmanager.h"
@@ -279,6 +280,9 @@ void MainWindow::init()
 
     auto dockText = addDock(i18n("Speech Editor"), QStringLiteral("textedit"), pCore->textEditWidget(), KDDockWidgets::Location_OnRight);
     dockText->close();
+
+    m_aquestalkDock = addDock(i18n("AquesTalk"), QStringLiteral("aquestalk"), new AquesTalkWidget(this), KDDockWidgets::Location_OnRight);
+    m_aquestalkDock->close();
 
     auto dockRemap = addDock(i18n("Time Remapping"), QStringLiteral("timeremap"), pCore->timeRemapWidget(), KDDockWidgets::Location_OnRight);
     dockRemap->close();
